@@ -1,122 +1,112 @@
-from app.views import mongo
-from bson import ObjectId
+import sqlite3
 from datetime import datetime
 
-
 class ExpenseModel:
-    """所有與 expenses collection 相關的資料庫操作。"""
+    """所有與 expenses 資料庫相關的操作 (使用 SQLite)"""
+    
+    DB_PATH = "expenses.db"
 
-    COLLECTION = "expenses"
+    def __init__(self):
+        self._init_db()
 
-    @property
-    def col(self):
-        return mongo.db[self.COLLECTION]
+    def get_db(self):
+        conn = sqlite3.connect(self.DB_PATH)
+        conn.row_factory = sqlite3.Row  # 讓回傳結果可以像 dict 一樣操作
+        return conn
+
+    def _init_db(self):
+        with self.get_db() as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS expenses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    category TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    note TEXT,
+                    created_at TEXT NOT NULL
+                )
+            ''')
 
     # ── Create ────────────────────────────────────────────────────────────────
 
     def create(self, title: str, amount: float, category: str, date: str, note: str = "") -> str:
-        """新增一筆支出，回傳新文件的 id 字串。"""
-        doc = {
-            "title": title,
-            "amount": float(amount),
-            "category": category,
-            "date": datetime.strptime(date, "%Y-%m-%d"),
-            "note": note,
-            "created_at": datetime.utcnow(),
-        }
-        result = self.col.insert_one(doc)
-        return str(result.inserted_id)
+        with self.get_db() as conn:
+            cursor = conn.cursor()
+            created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute('''
+                INSERT INTO expenses (title, amount, category, date, note, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (title, float(amount), category, date, note, created_at))
+            return str(cursor.lastrowid)
 
     # ── Read ──────────────────────────────────────────────────────────────────
 
     def get_all(self, sort_by: str = "date", order: int = -1) -> list:
-        """取得所有支出，預設依日期降冪排序。"""
-        docs = self.col.find().sort(sort_by, order)
-        return [self._serialize(d) for d in docs]
+        order_dir = "DESC" if order == -1 else "ASC"
+        # 避免 SQL Injection，限制 sort_by 的白名單
+        if sort_by not in ["date", "amount", "category", "created_at"]:
+            sort_by = "date"
+            
+        with self.get_db() as conn:
+            rows = conn.execute(f'SELECT * FROM expenses ORDER BY {sort_by} {order_dir}').fetchall()
+            return [dict(row) for row in rows]
 
     def get_by_id(self, expense_id: str) -> dict | None:
-        doc = self.col.find_one({"_id": ObjectId(expense_id)})
-        return self._serialize(doc) if doc else None
-
-    def get_by_category(self, category: str) -> list:
-        docs = self.col.find({"category": category}).sort("date", -1)
-        return [self._serialize(d) for d in docs]
+        with self.get_db() as conn:
+            row = conn.execute('SELECT * FROM expenses WHERE id = ?', (expense_id,)).fetchone()
+            return dict(row) if row else None
 
     def get_monthly_summary(self) -> list:
-        """
-        回傳每個月的支出總額：
-        [{"year": 2024, "month": 5, "total": 12345.0}, ...]
-        """
-        pipeline = [
-            {
-                "$group": {
-                    "_id": {
-                        "year": {"$year": "$date"},
-                        "month": {"$month": "$date"},
-                    },
-                    "total": {"$sum": "$amount"},
-                }
-            },
-            {"$sort": {"_id.year": 1, "_id.month": 1}},
-        ]
-        results = self.col.aggregate(pipeline)
-        return [
-            {"year": r["_id"]["year"], "month": r["_id"]["month"], "total": r["total"]}
-            for r in results
-        ]
+        with self.get_db() as conn:
+            rows = conn.execute('''
+                SELECT 
+                    CAST(strftime('%Y', date) AS INTEGER) as year,
+                    CAST(strftime('%m', date) AS INTEGER) as month,
+                    SUM(amount) as total
+                FROM expenses
+                GROUP BY year, month
+                ORDER BY year, month
+            ''').fetchall()
+            return [{"year": r["year"], "month": r["month"], "total": r["total"]} for r in rows]
 
     def get_category_summary(self) -> list:
-        """
-        回傳各類別的支出總額：
-        [{"category": "餐飲", "total": 5000.0}, ...]
-        """
-        pipeline = [
-            {"$group": {"_id": "$category", "total": {"$sum": "$amount"}}},
-            {"$sort": {"total": -1}},
-        ]
-        results = self.col.aggregate(pipeline)
-        return [{"category": r["_id"], "total": r["total"]} for r in results]
+        with self.get_db() as conn:
+            rows = conn.execute('''
+                SELECT category, SUM(amount) as total
+                FROM expenses
+                GROUP BY category
+                ORDER BY total DESC
+            ''').fetchall()
+            return [{"category": r["category"], "total": r["total"]} for r in rows]
 
     # ── Update ────────────────────────────────────────────────────────────────
 
     def update(self, expense_id: str, data: dict) -> bool:
-        """更新指定支出，回傳是否成功。"""
-        update_fields = {}
-        if "title" in data:
-            update_fields["title"] = data["title"]
-        if "amount" in data:
-            update_fields["amount"] = float(data["amount"])
-        if "category" in data:
-            update_fields["category"] = data["category"]
-        if "date" in data:
-            update_fields["date"] = datetime.strptime(data["date"], "%Y-%m-%d")
-        if "note" in data:
-            update_fields["note"] = data["note"]
+        update_fields = []
+        values = []
+        
+        for key in ["title", "amount", "category", "date", "note"]:
+            if key in data:
+                update_fields.append(f"{key} = ?")
+                val = float(data[key]) if key == "amount" else data[key]
+                values.append(val)
 
         if not update_fields:
             return False
 
-        result = self.col.update_one(
-            {"_id": ObjectId(expense_id)}, {"$set": update_fields}
-        )
-        return result.modified_count > 0
+        values.append(expense_id)
+        with self.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'''
+                UPDATE expenses SET {', '.join(update_fields)} WHERE id = ?
+            ''', values)
+            return cursor.rowcount > 0
 
     # ── Delete ────────────────────────────────────────────────────────────────
 
     def delete(self, expense_id: str) -> bool:
-        result = self.col.delete_one({"_id": ObjectId(expense_id)})
-        return result.deleted_count > 0
-
-    # ── Helper ────────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _serialize(doc: dict) -> dict:
-        """將 MongoDB 文件轉為可 JSON 序列化的 dict。"""
-        doc["id"] = str(doc.pop("_id"))
-        doc["date"] = doc["date"].strftime("%Y-%m-%d") if isinstance(doc.get("date"), datetime) else doc.get("date", "")
-        doc["created_at"] = (
-            doc["created_at"].strftime("%Y-%m-%d %H:%M:%S")
-            if isinstance(doc.get("created_at"), datetime)
-            else doc.get("created_at", "")
-        )
-        return doc
+        with self.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM expenses WHERE id = ?', (expense_id,))
+            return cursor.rowcount > 0

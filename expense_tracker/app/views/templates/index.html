@@ -303,7 +303,7 @@
             </div>
             <div class="item-amount">NT$ {{ "%.0f" | format(e.amount) }}</div>
             <div class="item-actions">
-              <button class="icon-btn" onclick="openEdit('{{ e.id }}','{{ e.title }}',{{ e.amount }},'{{ e.category }}','{{ e.date }}','{{ e.note }}')">✎</button>
+              <button class="icon-btn" onclick="openEdit('{{ e.id }}','{{ e.title }}','{{ e.amount }}','{{ e.category }}','{{ e.date }}','{{ e.note or '' }}')">✎</button>
               <button class="icon-btn del" onclick="confirmDelete('{{ e.id }}')">✕</button>
             </div>
           </div>
