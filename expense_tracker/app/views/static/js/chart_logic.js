@@ -52,7 +52,7 @@ async function renderMonthly() {
         y: {
           ticks: {
             callback: v => `$${(v / 1000).toFixed(0)}k`,
-          },
+          }
         },
       },
     },
